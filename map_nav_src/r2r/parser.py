@@ -1,8 +1,9 @@
 import argparse
 import os
+import math
 
 
-def parse_args():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="")
 
     parser.add_argument('--root_dir', type=str, default='../datasets')
@@ -99,7 +100,29 @@ def parse_args():
         default='imitation'
     )
 
-    args, _ = parser.parse_known_args()
+    # Offline, fixed-policy sampling and reward-weighted behavior cloning (R2R).
+    parser.add_argument('--trajectory_file', default=None, help='Collector output JSONL')
+    parser.add_argument('--num_samples', type=int, default=4, help='Candidates per instruction')
+    parser.add_argument('--collect_split', choices=['train', 'val_seen', 'val_unseen'], default='train')
+    parser.add_argument('--collect_limit', type=int, default=0, help='0: collect all instructions')
+    parser.add_argument('--reward_success', type=float, default=1.)
+    parser.add_argument('--reward_ndtw', type=float, default=1.)
+    parser.add_argument('--reward_spl', type=float, default=1.)
+    parser.add_argument('--replay_file', default=None, help='Train-only collector JSONL')
+    parser.add_argument('--replay_beta', type=float, default=1.)
+    parser.add_argument('--replay_weight', type=float, default=0.2)
+    parser.add_argument('--policy_stop', action='store_true', help='Greedy evaluation: current-node STOP, no final backtrack')
+
+    args, _ = parser.parse_known_args(argv)
+    if args.replay_file:
+        if args.dataset != 'r2r' or args.world_size != 1 or args.aug is not None:
+            parser.error('Replay v1 supports single-GPU R2R without --aug')
+        if args.resume_file is None:
+            parser.error('Replay training requires --resume_file')
+        if not math.isfinite(args.replay_beta) or args.replay_beta <= 0:
+            parser.error('--replay_beta must be finite and positive')
+        if not math.isfinite(args.replay_weight) or args.replay_weight <= 0:
+            parser.error('--replay_weight must be finite and positive')
 
     args = postprocess_args(args)
 

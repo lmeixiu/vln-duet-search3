@@ -19,6 +19,7 @@ from r2r.parser import parse_args
 
 from models.vlnbert_init import get_tokenizer
 from r2r.agent import GMapNavAgent
+from r2r.replay import ReplayBuffer
 
 
 def build_dataset(args, rank=0, is_test=False):
@@ -94,14 +95,18 @@ def train(args, train_env, val_envs, aug_env=None, rank=-1):
 
     agent_class = GMapNavAgent
     listner = agent_class(args, train_env, rank=rank)
+    if args.replay_file:
+        listner.replay_buffer = ReplayBuffer(args.replay_file, args, train_env.data)
+        print('Loaded weighted replay for %d training instructions' % len(listner.replay_buffer.groups))
 
     # resume file
     start_iter = 0
     if args.resume_file is not None:
-        start_iter = listner.load(os.path.join(args.resume_file))
+        # load() returns the zero-based index of the last completed update.
+        start_iter = listner.load(os.path.join(args.resume_file)) + 1
         if default_gpu:
             write_to_record_file(
-                "\nLOAD the model from {}, iteration ".format(args.resume_file, start_iter),
+                "\nLOAD the model from {}, iteration {}".format(args.resume_file, start_iter),
                 record_file
             )
        
@@ -134,9 +139,10 @@ def train(args, train_env, val_envs, aug_env=None, rank=-1):
     if args.dataset == 'r4r':
         best_val = {'val_unseen_sampled': {"spl": 0., "sr": 0., "state":""}}
     
-    for idx in range(start_iter, start_iter+args.iters, args.log_every):
+    end_iter = start_iter + args.iters
+    for idx in range(start_iter, end_iter, args.log_every):
         listner.logs = defaultdict(list)
-        interval = min(args.log_every, args.iters-idx)
+        interval = min(args.log_every, end_iter-idx)
         iter = idx + interval
 
         # Train for log_every interval
@@ -170,6 +176,10 @@ def train(args, train_env, val_envs, aug_env=None, rank=-1):
             writer.add_scalar("policy_entropy", entropy, idx)
             writer.add_scalar("loss/RL_loss", RL_loss, idx)
             writer.add_scalar("loss/IL_loss", IL_loss, idx)
+            if args.replay_file:
+                replay_loss = np.mean(listner.logs['replay_loss'])
+                writer.add_scalar('loss/replay', replay_loss, idx)
+                write_to_record_file('weighted replay loss %.6f' % replay_loss, record_file)
             writer.add_scalar("total_actions", total, idx)
             writer.add_scalar("max_length", length, idx)
             write_to_record_file(
@@ -201,14 +211,14 @@ def train(args, train_env, val_envs, aug_env=None, rank=-1):
                         best_val[env_name]['spl'] = score_summary['spl']
                         best_val[env_name]['sr'] = score_summary['sr']
                         best_val[env_name]['state'] = 'Iter %d %s' % (iter, loss_str)
-                        listner.save(idx, os.path.join(args.ckpt_dir, "best_%s" % (env_name)))
+                        listner.save(iter - 1, os.path.join(args.ckpt_dir, "best_%s" % (env_name)))
                 
         
         if default_gpu:
-            listner.save(idx, os.path.join(args.ckpt_dir, "latest_dict"))
+            listner.save(iter - 1, os.path.join(args.ckpt_dir, "latest_dict"))
 
             write_to_record_file(
-                ('%s (%d %d%%) %s' % (timeSince(start, float(iter)/args.iters), iter, float(iter)/args.iters*100, loss_str)),
+                ('%s (%d %d%%) %s' % (timeSince(start, float(iter-start_iter)/args.iters), iter, float(iter-start_iter)/args.iters*100, loss_str)),
                 record_file
             )
             write_to_record_file("BEST RESULT TILL NOW", record_file)

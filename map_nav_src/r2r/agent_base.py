@@ -147,6 +147,7 @@ class Seq2SeqAgent(BaseAgent):
     def _build_model(self):
         raise NotImplementedError('child class should implement _build_model: self.vln_bert & self.critic')
 
+    @torch.no_grad()
     def test(self, use_dropout=False, feedback='argmax', allow_cheat=False, iters=None, viz=False):
         ''' Evaluate once on each instruction in the current environment '''
         self.feedback = feedback
@@ -200,6 +201,9 @@ class Seq2SeqAgent(BaseAgent):
 
             #print(self.rank, iter, self.loss)
             self.loss.backward()
+
+            if getattr(self, 'replay_buffer', None) is not None:
+                self.backward_replay()
 
             torch.nn.utils.clip_grad_norm_(self.vln_bert.parameters(), 40.)
 

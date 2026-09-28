@@ -284,9 +284,14 @@ class R2RNavBatch(object):
             obs.append(ob)
         return obs
 
-    def reset(self, **kwargs):
+    def reset(self, batch=None, **kwargs):
         ''' Load a new minibatch / episodes. '''
-        self._next_minibatch(**kwargs)
+        if batch is None:
+            self._next_minibatch(**kwargs)
+        else:
+            if len(batch) != self.batch_size:
+                raise ValueError('Explicit batch must match the simulator batch size')
+            self.batch = list(batch)
         
         scanIds = [item['scan'] for item in self.batch]
         viewpointIds = [item['path'][0] for item in self.batch]

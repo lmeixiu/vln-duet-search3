@@ -6,7 +6,6 @@ import random
 import math
 import time
 from collections import defaultdict
-import line_profiler
 
 import torch
 import torch.nn as nn
@@ -37,7 +36,7 @@ class GMapNavAgent(Seq2SeqAgent):
         seq_lengths = [len(ob['instr_encoding']) for ob in obs]
         
         seq_tensor = np.zeros((len(obs), max(seq_lengths)), dtype=np.int64)
-        mask = np.zeros((len(obs), max(seq_lengths)), dtype=np.bool)
+        mask = np.zeros((len(obs), max(seq_lengths)), dtype=np.bool_)
         for i, ob in enumerate(obs):
             seq_tensor[i, :seq_lengths[i]] = ob['instr_encoding']
             mask[i, :seq_lengths[i]] = True
@@ -124,8 +123,9 @@ class GMapNavAgent(Seq2SeqAgent):
 
             gmap_step_ids = [gmap.node_step_ids.get(vp, 0) for vp in gmap_vpids]
             gmap_img_embeds = [gmap.get_node_embed(vp) for vp in gmap_vpids[1:]]
+            stop_reference = gmap_img_embeds[0] if gmap_img_embeds else gmap.get_node_embed(obs[i]['viewpoint'])
             gmap_img_embeds = torch.stack(
-                [torch.zeros_like(gmap_img_embeds[0])] + gmap_img_embeds, 0
+                [torch.zeros_like(stop_reference)] + gmap_img_embeds, 0
             )   # cuda
 
             gmap_pos_fts = gmap.get_pos_fts(
@@ -313,7 +313,18 @@ class GMapNavAgent(Seq2SeqAgent):
                 self.scanvp_cands[scanvp][cand['viewpointId']] = cand['pointId']
 
     # @profile
-    def rollout(self, train_ml=None, train_rl=False, reset=True):
+    def rollout(self, train_ml=None, train_rl=False, reset=True,
+                record_actions=False, replay=None):
+        # These modes never use a teacher to select actions or STOP. Keeping them
+        # separate preserves the upstream teacher/DAgger and evaluation defaults.
+        autonomous = self.feedback in ('sample_policy', 'replay') or (
+            self.feedback == 'argmax' and getattr(self.args, 'policy_stop', False))
+        if record_actions and self.feedback != 'sample_policy':
+            raise ValueError('Action recording requires sample_policy feedback')
+        if (replay is not None) != (self.feedback == 'replay'):
+            raise ValueError('Replay records and replay feedback must be used together')
+        if replay is not None and train_ml is not None:
+            raise ValueError('Replay and teacher losses require separate rollouts')
         if reset:  # Reset env
             obs = self.env.reset()
         else:
@@ -321,6 +332,8 @@ class GMapNavAgent(Seq2SeqAgent):
         self._update_scanvp_cands(obs)
 
         batch_size = len(obs)
+        if replay is not None and len(replay) != batch_size:
+            raise ValueError('Replay batch size mismatch')
         # build graph: keep the start viewpoint
         gmaps = [GraphMap(ob['viewpoint']) for ob in obs]
         for i, ob in enumerate(obs):
@@ -332,6 +345,10 @@ class GMapNavAgent(Seq2SeqAgent):
             'path': [[ob['viewpoint']]],
             'details': {},
         } for ob in obs]
+        if record_actions:
+            for item in traj:
+                item['steps'] = []
+        replay_loss = 0.
 
         # Language input: txt_ids, txt_masks
         language_inputs = self._language_variable(obs)
@@ -424,7 +441,28 @@ class GMapNavAgent(Seq2SeqAgent):
                 # print(t, 'ml_loss', ml_loss.item(), self.criterion(nav_logits, nav_targets).item())
                                                  
             # Determinate the next navigation viewpoint
-            if self.feedback == 'teacher':
+            if self.feedback == 'replay':
+                targets = []
+                for i, ob in enumerate(obs):
+                    if ended[i]:
+                        targets.append(0)
+                        continue
+                    item = replay[i]
+                    if item['instr_id'] != ob['instr_id'] or t >= len(item['steps']):
+                        raise ValueError('Replay instruction or step mismatch')
+                    step = item['steps'][t]
+                    if step['viewpoint'] != ob['viewpoint'] or step['view_index'] != ob['viewIndex']:
+                        raise ValueError('Replay observation diverged from collected trajectory')
+                    if step['action'] not in nav_vpids[i]:
+                        raise ValueError('Replay action is absent from the current graph')
+                    target = nav_vpids[i].index(step['action'])
+                    if not torch.isfinite(nav_logits[i, target]).item():
+                        raise ValueError('Replay action is masked in the current graph')
+                    targets.append(target)
+                a_t = torch.tensor(targets, device=nav_logits.device)
+            elif self.feedback == 'sample_policy':
+                a_t = torch.distributions.Categorical(logits=nav_logits).sample()
+            elif self.feedback == 'teacher':
                 a_t = nav_targets                 # teacher forcing
             elif self.feedback == 'argmax':
                 _, a_t = nav_logits.max(1)        # student forcing - argmax
@@ -450,7 +488,47 @@ class GMapNavAgent(Seq2SeqAgent):
                 sys.exit('Invalid feedback option')
 
             # Determine stop actions
-            if self.feedback == 'teacher' or self.feedback == 'sample': # in training
+            if autonomous:
+                # A forced terminal transition is deterministic under the
+                # collection policy, so its log probability and BC loss are 0.
+                forced = [None] * batch_size
+                for i in range(batch_size):
+                    if nav_inputs['no_vp_left'][i]:
+                        forced[i] = 'no_candidates'
+                    elif t == self.args.max_action_len - 1:
+                        forced[i] = 'horizon'
+                    if forced[i] is not None:
+                        a_t[i] = 0
+                a_t_stop = (a_t == 0).detach().cpu().numpy()
+                if record_actions:
+                    log_probs = F.log_softmax(nav_logits, dim=1)
+                    for i, ob in enumerate(obs):
+                        if not ended[i]:
+                            action_idx = int(a_t[i].item())
+                            traj[i]['steps'].append({
+                                'viewpoint': ob['viewpoint'], 'view_index': int(ob['viewIndex']),
+                                'action': nav_vpids[i][action_idx],
+                                'forced': forced[i],
+                                'log_prob': 0. if forced[i] else float(log_probs[i, action_idx].item()),
+                            })
+                if replay is not None:
+                    targets = a_t.clone()
+                    for i in range(batch_size):
+                        if ended[i]:
+                            targets[i] = self.args.ignoreid
+                            continue
+                        step = replay[i]['steps'][t]
+                        if step['forced'] != forced[i] or step['action'] != nav_vpids[i][int(a_t[i].item())]:
+                            raise ValueError('Replay termination policy mismatch')
+                        if a_t_stop[i] != (t == len(replay[i]['steps']) - 1):
+                            raise ValueError('Replay STOP does not match recorded trajectory length')
+                        if forced[i] is not None:
+                            targets[i] = self.args.ignoreid
+                    weights = nav_logits.new_tensor([x['loss_weight'] for x in replay])
+                    replay_loss = replay_loss + (weights * F.cross_entropy(
+                        nav_logits, targets, ignore_index=self.args.ignoreid, reduction='none'
+                    )).sum() / batch_size
+            elif self.feedback == 'teacher' or self.feedback == 'sample': # in training
                 # a_t_stop = [ob['viewpoint'] in ob['gt_end_vps'] for ob in obs]
                 a_t_stop = [ob['viewpoint'] == ob['gt_path'][-1] for ob in obs]
             else:
@@ -468,7 +546,7 @@ class GMapNavAgent(Seq2SeqAgent):
             # Make action and get the new state
             self.make_equiv_action(cpu_a_t, gmaps, obs, traj)
             for i in range(batch_size):
-                if (not ended[i]) and just_ended[i]:
+                if (not autonomous) and (not ended[i]) and just_ended[i]:
                     stop_node, stop_score = None, {'stop': -float('inf')}
                     for k, v in gmaps[i].node_stop_scores.items():
                         if v['stop'] > stop_score['stop']:
@@ -495,9 +573,29 @@ class GMapNavAgent(Seq2SeqAgent):
             if ended.all():
                 break
 
+        if replay is not None:
+            for actual, expected in zip(traj, replay):
+                if actual['path'] != expected['path']:
+                    raise ValueError('Replayed physical path differs from collected path')
+            self.replay_loss = replay_loss
         if train_ml is not None:
             ml_loss = ml_loss * train_ml / batch_size
             self.loss += ml_loss
             self.logs['IL_loss'].append(ml_loss.item())
 
         return traj
+
+    def backward_replay(self):
+        """Accumulate a weighted BC gradient after the upstream IL backward."""
+        batch, records = self.replay_buffer.sample(self.args.batch_size)
+        feedback = self.feedback
+        try:
+            self.env.reset(batch=batch)
+            self.feedback = 'replay'
+            self.rollout(reset=False, replay=records)
+            loss = self.args.replay_weight * self.replay_loss
+            loss.backward()
+            self.logs['replay_loss'].append(float(loss.detach().item()))
+        finally:
+            self.feedback = feedback
+            self.replay_loss = None

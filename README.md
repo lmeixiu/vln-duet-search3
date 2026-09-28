@@ -1,3 +1,20 @@
+# VLN-DUET Search3: Reward-weighted Trajectory Replay
+
+This fork adds a first R2R implementation of autonomous fixed-policy trajectory
+sampling and reward-weighted behavior cloning. It retains the official DUET
+architecture and original training/evaluation entry points. No measured navigation
+improvement is claimed yet.
+
+**[中文使用说明、方法与实验协议](docs/weighted_replay_zh.md)**
+
+- Collect K independent trajectories per instruction with policy-selected STOP.
+- Score completed training trajectories with Success, nDTW and SPL.
+- Add instruction-normalized, reward-weighted replay to the original IL/DAgger loss.
+- Evaluate one greedy trajectory with the same STOP protocol for baseline/student.
+- Run `python -m unittest discover -s tests -v` for CPU regression tests.
+
+Original upstream documentation follows.
+
 # Think Global, Act Local: Dual-scale GraphTransformer for Vision-and-Language Navigation
 
 This repository is the official implementation of [Think Global, Act Local: Dual-scale GraphTransformer for Vision-and-Language Navigation](https://arxiv.org/abs/2202.11742). 
