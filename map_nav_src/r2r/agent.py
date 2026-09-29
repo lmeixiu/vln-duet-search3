@@ -469,7 +469,9 @@ class GMapNavAgent(Seq2SeqAgent):
                 a_t = a_t.detach() 
             elif self.feedback == 'sample':
                 c = torch.distributions.Categorical(nav_probs)
-                self.logs['entropy'].append(c.entropy().sum().item())            # For log
+                active = torch.as_tensor(~ended, device=nav_probs.device)
+                self.logs['entropy'].append(c.entropy()[active].sum().item())
+                self.logs['entropy_actions'].append(int(active.sum().item()))
                 entropys.append(c.entropy())                                     # For optimization
                 a_t = c.sample().detach() 
             elif self.feedback == 'expl_sample':

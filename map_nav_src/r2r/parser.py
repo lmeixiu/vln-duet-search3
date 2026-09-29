@@ -110,6 +110,9 @@ def parse_args(argv=None):
     parser.add_argument('--reward_spl', type=float, default=1.)
     parser.add_argument('--replay_file', default=None, help='Train-only collector JSONL')
     parser.add_argument('--replay_beta', type=float, default=1.)
+    parser.add_argument('--replay_mode', choices=['reward', 'uniform'], default='reward')
+    parser.add_argument('--save_predictions', action='store_true', help='Save validation predictions without adding test')
+    parser.add_argument('--eval_splits', nargs='+', choices=['val_train_seen', 'val_seen', 'val_unseen', 'test'], default=None)
     parser.add_argument('--replay_weight', type=float, default=0.2)
     parser.add_argument('--policy_stop', action='store_true', help='Greedy evaluation: current-node STOP, no final backtrack')
 

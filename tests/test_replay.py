@@ -64,6 +64,15 @@ class ReplayTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             reward_from_metrics({'success': 100., 'nDTW': 1., 'spl': 1.})
 
+    def test_uniform_replay_ignores_reward_for_loss_weights(self):
+        args, item, meta, group = fixture()
+        args.replay_mode = 'uniform'
+        buffer = self.load_buffer(args, item, meta, group)
+        self.assertEqual([r['loss_weight'] for r in buffer.groups[0][1]], [1., 1.])
+        args.replay_mode = 'reward'
+        reward_buffer = self.load_buffer(args, item, meta, group)
+        self.assertGreater(reward_buffer.groups[0][1][1]['loss_weight'], 1.)
+
     def test_reject_validation_incomplete_and_changed_config(self):
         for mutation in ('validation', 'incomplete', 'config', 'annotation', 'reward', 'policy'):
             args, item, meta, group = fixture()

@@ -7,6 +7,12 @@ improvement is claimed yet.
 
 **[中文使用说明、方法与实验协议](docs/weighted_replay_zh.md)**
 
+**[下一轮实验：分支切换、完整命令、代码流程与输出解读](docs/EXPERIMENT_RUNBOOK_ZH.md)**
+
+Prepared branches: `exp/dagger-control`, `exp/uniform-replay`, `exp/reward-replay`.
+Use `map_nav_src/scripts/run_r2r_experiment.sh` for these controlled experiments.
+Its evaluation saves validation predictions without automatically running test.
+
 - Collect K independent trajectories per instruction with policy-selected STOP.
 - Score completed training trajectories with Success, nDTW and SPL.
 - Add instruction-normalized, reward-weighted replay to the original IL/DAgger loss.

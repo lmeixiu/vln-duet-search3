@@ -126,7 +126,11 @@ class ReplayBuffer:
                     if not math.isclose(value, record['reward'], rel_tol=1e-6, abs_tol=1e-6):
                         raise ValueError('Stored reward does not match metrics')
                     rewards.append(value)
-                weights = reward_weights(rewards, args.replay_beta)
+                mode = getattr(args, 'replay_mode', 'reward')
+                if mode not in ('reward', 'uniform'):
+                    raise ValueError('Unknown replay mode')
+                weights = ([1. / sample_count] * sample_count if mode == 'uniform'
+                           else reward_weights(rewards, args.replay_beta))
                 for record, weight in zip(records, weights):
                     # Sample a candidate uniformly; K*w makes the expectation
                     # exactly sum_i w_i * trajectory_NLL_i for each instruction.

@@ -63,6 +63,9 @@ class BaseAgent(object):
                         self.results[traj['instr_id']] = traj
                 if looped:
                     break
+                if len(self.results) % max(self.env.batch_size * 20, 1) == 0:
+                    print('Evaluation %s: %d/%d instructions' % (
+                        self.env.name, len(self.results), self.env.size()), flush=True)
 
     def test_viz(self, iters=None, **kwargs):
         self.env.reset_epoch(shuffle=(iters is not None))   # If iters is not none, shuffle the env batch

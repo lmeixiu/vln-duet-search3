@@ -65,6 +65,10 @@ def build_dataset(args, rank=0, is_test=False):
     
     if args.submit and args.dataset != 'r4r':
         val_env_names.append('test')
+    if args.eval_splits is not None:
+        val_env_names = args.eval_splits
+        if not args.test and 'test' in val_env_names:
+            raise ValueError('Test split cannot be used for training checkpoint selection')
         
     val_envs = {}
     for split in val_env_names:
@@ -165,26 +169,19 @@ def train(args, train_env, val_envs, aug_env=None, rank=-1):
 
         if default_gpu:
             # Log the training stats to tensorboard
-            total = max(sum(listner.logs['total']), 1)          # RL: total valid actions for all examples in the batch
-            length = max(len(listner.logs['critic_loss']), 1)   # RL: total (max length) in the batch
-            critic_loss = sum(listner.logs['critic_loss']) / total
-            policy_loss = sum(listner.logs['policy_loss']) / total
-            RL_loss = sum(listner.logs['RL_loss']) / max(len(listner.logs['RL_loss']), 1)
+            total = sum(listner.logs['entropy_actions'])
             IL_loss = sum(listner.logs['IL_loss']) / max(len(listner.logs['IL_loss']), 1)
-            entropy = sum(listner.logs['entropy']) / total
-            writer.add_scalar("loss/critic", critic_loss, idx)
+            entropy = sum(listner.logs['entropy']) / max(total, 1)
             writer.add_scalar("policy_entropy", entropy, idx)
-            writer.add_scalar("loss/RL_loss", RL_loss, idx)
             writer.add_scalar("loss/IL_loss", IL_loss, idx)
             if args.replay_file:
                 replay_loss = np.mean(listner.logs['replay_loss'])
                 writer.add_scalar('loss/replay', replay_loss, idx)
                 write_to_record_file('weighted replay loss %.6f' % replay_loss, record_file)
-            writer.add_scalar("total_actions", total, idx)
-            writer.add_scalar("max_length", length, idx)
+            writer.add_scalar("sampled_active_actions", total, idx)
             write_to_record_file(
-                "\ntotal_actions %d, max_length %d, entropy %.4f, IL_loss %.4f, RL_loss %.4f, policy_loss %.4f, critic_loss %.4f" % (
-                    total, length, entropy, IL_loss, RL_loss, policy_loss, critic_loss),
+                "\nsampled_active_actions %d, mean_action_entropy %.4f, IL_loss %.4f" % (
+                    total, entropy, IL_loss),
                 record_file
             )
 
@@ -245,12 +242,14 @@ def valid(args, train_env, val_envs, rank=-1):
     for env_name, env in val_envs.items():
         prefix = 'submit' if args.detailed_output is False else 'detail'
         if os.path.exists(os.path.join(args.pred_dir, "%s_%s.json" % (prefix, env_name))):
+            print('Skipping existing predictions for %s; use a new output directory to re-evaluate' % env_name, flush=True)
             continue
         agent.logs = defaultdict(list)
         agent.env = env
 
         iters = None
         start_time = time.time()
+        print('Starting %s: %d instructions' % (env_name, env.size()), flush=True)
         agent.test(
             use_dropout=False, feedback='argmax', iters=iters)
         print(env_name, 'cost time: %.2fs' % (time.time() - start_time))
@@ -264,8 +263,10 @@ def valid(args, train_env, val_envs, rank=-1):
                 for metric, val in score_summary.items():
                     loss_str += ', %s: %.2f' % (metric, val)
                 write_to_record_file(loss_str+'\n', record_file)
+                with open(os.path.join(args.pred_dir, 'metrics_%s.json' % env_name), 'w') as handle:
+                    json.dump(score_summary, handle, indent=2)
 
-            if args.submit:
+            if args.submit or args.save_predictions:
                 json.dump(
                     preds,
                     open(os.path.join(args.pred_dir, "%s_%s.json" % (prefix, env_name)), 'w'),

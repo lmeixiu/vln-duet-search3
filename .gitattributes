@@ -1,0 +1,2 @@
+map_nav_src/scripts/run_r2r_experiment.sh text eol=lf
+experiments/variant.env text eol=lf
